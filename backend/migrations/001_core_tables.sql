@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS merge_runs (
   metrics JSON NOT NULL,
   log_text TEXT,
   seed_key VARCHAR(120) UNIQUE,
+  -- 断点续跑：快照边界 / 已确认表 checkpoint / 执行进度 / 心跳
+  snapshot_max_event_id BIGINT,
+  checkpoint JSON NOT NULL,
+  progress JSON NOT NULL,
+  heartbeat_at DATETIME,
+  attempt_count INT NOT NULL DEFAULT 1,
   started_at DATETIME NOT NULL,
   finished_at DATETIME
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

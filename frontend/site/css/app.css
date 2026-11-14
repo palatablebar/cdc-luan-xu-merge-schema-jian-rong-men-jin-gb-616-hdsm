@@ -1603,3 +1603,82 @@ pre.code {
     grid-template-columns: 88px 1fr 36px;
   }
 }
+
+/* ---------- 断点续跑：批次进度条 / 续跑按钮 / 对账面板 ---------- */
+.run-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 150px;
+}
+.run-progress .rp-track {
+  position: relative;
+  flex: 1;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--line, rgba(120, 120, 120, 0.18));
+  overflow: hidden;
+}
+.run-progress .rp-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: var(--accent, #2f6fed);
+  transition: width 0.3s ease;
+}
+.run-progress.interrupted .rp-fill {
+  background: var(--danger, #d64545);
+}
+.run-progress.done .rp-fill {
+  background: var(--ok, #2e9e5b);
+}
+.run-progress .rp-meta {
+  font-size: var(--fs-xs);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.resume-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--danger, #d64545);
+  border-radius: 10px;
+  background: rgba(214, 69, 69, 0.08);
+}
+.resume-banner .rb-text {
+  font-size: var(--fs-sm);
+}
+.resume-banner .rb-text b {
+  color: var(--danger, #d64545);
+}
+.recon-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.recon-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+}
+.recon-list .ri-ok {
+  color: var(--ok, #2e9e5b);
+  font-weight: 700;
+}
+.recon-list .ri-bad {
+  color: var(--danger, #d64545);
+  font-weight: 700;
+}
+.run-row-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+.pill-count {
+  font-variant-numeric: tabular-nums;
+}

@@ -29,8 +29,23 @@ class Settings(BaseSettings):
     rate_limit_write_per_minute: int = 60
     app_timezone_offset_minutes: int = 480
 
+    # —— 断点续跑 ——
+    # 每个分块处理的事件数：处理完一个分块刷新心跳与进度并落一次库。
+    merge_chunk_size: int = 200
+    # 分块之间的停顿秒数（演示用，让“处理中/剩余数量”可见；生产置 0）。
+    merge_chunk_delay_seconds: float = 0.05
+    # running 心跳超过该秒数没有刷新即判定为中断（interrupted）。
+    run_stale_seconds: int = 60
+    # 故障注入：在第 N 个事件分块处理完后主动抛出异常（仅测试/演示，0 表示关闭）。
+    merge_fail_after_chunks: int = 0
+    # 故障注入：累计确认事件数达到该值、且还有未确认表时中断（精确模拟表间中断，0 表示关闭）。
+    merge_fail_after_events: int = 0
+
     @property
     def database_url(self) -> str:
+        if self.db_kind == "sqlite":
+            # 仅用于本地无依赖测试/CI：db_name 直接作为 sqlite 文件路径（:memory: 亦可）
+            return f"sqlite:///{self.db_name}"
         if self.db_kind == "mysql":
             return (
                 f"mysql+pymysql://{self.db_user}:{self.db_password}"

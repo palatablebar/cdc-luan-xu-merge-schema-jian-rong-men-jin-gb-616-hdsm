@@ -4,10 +4,14 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.models import Base
 from src.utils.timeutil import utcnow
+
+# MutableDict：让 JSON 字典的原地/引用变更在 MySQL 与 SQLite 上都能被标记为脏并持久化。
+JSON_DICT = MutableDict.as_mutable(JSON)
 
 
 class MergeRun(Base):
@@ -29,8 +33,19 @@ class MergeRun(Base):
     dup_skipped: Mapped[int] = mapped_column(Integer, default=0)
     rejected_count: Mapped[int] = mapped_column(Integer, default=0)
     watermark_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    metrics: Mapped[dict] = mapped_column(JSON_DICT, default=dict)
     log_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     seed_key: Mapped[str | None] = mapped_column(String(120), unique=True, nullable=True)
+    # —— 断点续跑（checkpoint）相关 ——
+    # 批次启动时的事件快照边界：只处理 id <= snapshot_max_event_id 的事件，
+    # 执行期间持续到达的新事件不污染本批（由下一批或续跑时重新裁决）。
+    snapshot_max_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 已确认表的逐表结果（表完整折叠并落库后写入），续跑时直接跳过这些表。
+    checkpoint: Mapped[dict] = mapped_column(JSON_DICT, default=dict)
+    # 执行进度（每处理完一个分块刷新），用于页面展示处理中/剩余数量。
+    progress: Mapped[dict] = mapped_column(JSON_DICT, default=dict)
+    # 执行心跳：worker 每处理一个分块刷新；running 且心跳超时判 interrupted。
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -7,6 +7,7 @@ ACTIONS: dict[str, str] = {
     "table.update": "修改源表配置",
     "event.ingest": "注入乱序事件",
     "run.create": "发起合并批次",
+    "run.resume": "中断后续跑批次",
     "reject.replay": "处置拒绝行",
     "schema.gate": "门禁复核",
     "schema.reevaluate": "重算兼容性",

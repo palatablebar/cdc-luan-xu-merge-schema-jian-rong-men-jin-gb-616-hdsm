@@ -47,6 +47,10 @@ def _breakdown(db: Session, column, labels: dict, order: list[str] | None = None
 
 
 def overview(db: Session) -> dict:
+    # 总览是运维最常开的页面：顺带把心跳超时的 running 批次翻成 interrupted
+    from src.services import merge_run_service
+
+    merge_run_service.sweep_stale_runs(db)
     tables_total = db.scalar(select(func.count()).select_from(SourceTable)) or 0
     tables_enabled = db.scalar(select(func.count()).select_from(SourceTable).where(SourceTable.enabled.is_(True))) or 0
     events_total = db.scalar(select(func.count()).select_from(CdcEvent)) or 0
@@ -120,24 +124,49 @@ def overview(db: Session) -> dict:
         "gate_pending": gate_pending,
         "gate_breaking": gate_breaking,
         "worker_alive": worker_alive(),
-        "latest_run": {
-            "id": latest_run.id,
-            "run_no": latest_run.run_no,
-            "scope": "全库批次"
-            if latest_run.table_id is None
-            else next(
-                (table.name for table in tables if table.id == latest_run.table_id),
-                f"表 #{latest_run.table_id}",
-            ),
-            "status": latest_run.status,
-            "status_label": RUN_STATUS_LABELS.get(latest_run.status, latest_run.status),
-            "events_in": latest_run.events_in,
-            "upsert_rows": latest_run.upsert_rows,
-            "late_count": latest_run.late_count,
-            "rejected_count": latest_run.rejected_count,
-            "watermark_at": iso_utc(latest_run.watermark_at),
-            "started_at": iso_utc(latest_run.started_at),
-        }
+        "latest_run": (
+            lambda: {
+                "id": latest_run.id,
+                "run_no": latest_run.run_no,
+                "scope": "全库批次"
+                if latest_run.table_id is None
+                else next(
+                    (table.name for table in tables if table.id == latest_run.table_id),
+                    f"表 #{latest_run.table_id}",
+                ),
+                "status": latest_run.status,
+                "status_label": RUN_STATUS_LABELS.get(latest_run.status, latest_run.status),
+                "display_status": (
+                    "processing"
+                    if latest_run.status in {"queued", "running", "interrupted"}
+                    else "completed"
+                ),
+                "resumable": latest_run.status == "interrupted",
+                "events_in": latest_run.events_in,
+                "processed_events": int((latest_run.progress or {}).get("processed_events") or 0)
+                if latest_run.status not in {"success", "partial"}
+                else latest_run.events_in,
+                "remaining_events": max(
+                    0,
+                    latest_run.events_in
+                    - int((latest_run.progress or {}).get("processed_events") or 0),
+                )
+                if latest_run.status not in {"success", "partial"}
+                else 0,
+                "review_pending": db.scalar(
+                    select(func.count())
+                    .select_from(RejectRow)
+                    .where(RejectRow.run_id == latest_run.id, RejectRow.replay_status == "pending")
+                )
+                or 0,
+                "upsert_rows": latest_run.upsert_rows,
+                "late_count": latest_run.late_count,
+                "rejected_count": latest_run.rejected_count,
+                "watermark_at": iso_utc(latest_run.watermark_at),
+                "heartbeat_at": iso_utc(latest_run.heartbeat_at),
+                "started_at": iso_utc(latest_run.started_at),
+            }
+        )()
         if latest_run
         else None,
         "recent_runs": [
@@ -146,9 +175,17 @@ def overview(db: Session) -> dict:
                 "run_no": run.run_no,
                 "status": run.status,
                 "status_label": RUN_STATUS_LABELS.get(run.status, run.status),
+                "display_status": "processing" if run.status in {"queued", "running", "interrupted"} else "completed",
+                "resumable": run.status == "interrupted",
                 "events_in": run.events_in,
                 "late_count": run.late_count,
                 "rejected_count": run.rejected_count,
+                "review_pending": db.scalar(
+                    select(func.count())
+                    .select_from(RejectRow)
+                    .where(RejectRow.run_id == run.id, RejectRow.replay_status == "pending")
+                )
+                or 0,
                 "started_at": iso_utc(run.started_at),
             }
             for run in recent_runs

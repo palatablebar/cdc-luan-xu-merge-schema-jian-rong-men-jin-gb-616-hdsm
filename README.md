@@ -39,7 +39,7 @@
 |---|---|---|---|---|
 | ① | 源表与订阅 | `#/tables` 源表与订阅 | `table_service` / `table_controller` | `GET/POST /api/tables`、`GET/PATCH /api/tables/{id}` |
 | ② | 事件接入与乱序注入 | `#/events` 事件流 | `event_service` / `event_controller` | `GET /api/events`、`POST /api/events` |
-| ③ | 水位线乱序合并 | `#/runs` 合并批次 | `watermark_merge`(算法 A)+`merge_run_service` / `run_controller` | `GET/POST /api/runs`、`GET /api/runs/{id}/detail` |
+| ③ | 水位线乱序合并（可中断续跑） | `#/runs` 合并批次 | `watermark_merge`(算法 A)+`merge_run_service`(续跑引擎) / `run_controller` | `GET/POST /api/runs`、`POST /api/runs/{id}/resume`、`GET /api/runs/{id}/detail` |
 | ④ | 拒绝行判定与重放 | `#/runs` 抽屉内拒绝行 | `reject_service` / `reject_controller` | `GET /api/rejects`、`PATCH /api/rejects/{id}/replay` |
 | ⑤ | Schema 兼容门禁 | `#/schema` Schema 门禁 | `schema_gate`(算法 B)+`schema_service` / `schema_controller` | `GET /api/schema-changes`、`PATCH .../{id}/gate`、`POST .../{id}/reevaluate` |
 | ⑥ | 导出与批次统计 | `#/schema`、`#/runs` 导出按钮 / `#/overview` 总览 | `export_service`+`overview_service` / `export_controller` | `GET /api/exports/{merge-runs,rejects,schema-changes}.csv`、`GET /api/overview` |
@@ -90,7 +90,7 @@ docker compose exec -T backend python -m pytest tests -q
 |---|---|
 | 前端 | 原生 HTML5 + CSS（oklch 令牌 / 响应式三档）+ ES Modules；无框架、无打包、除 Google Fonts 外无 CDN |
 | 后端 | Python 3.11、FastAPI 0.115、SQLAlchemy 2.0、PyJWT、passlib(bcrypt)、Pydantic 2 |
-| 异步 | Celery 5.4 + Redis（10s 心跳、每日 07:40 全库合并） |
+| 异步 | Celery 5.4 + Redis（10s 心跳、30s 中断看门狗、每日 07:40 全库合并） |
 | 数据库 | MySQL 8.0（utf8mb4，JSON 列存 before/after/指标） |
 | 部署 | Docker Compose，恰好 5 服务，全部带 healthcheck |
 
@@ -108,6 +108,27 @@ docker compose exec -T backend python -m pytest tests -q
 - **输出**：`upsert_rows / deletes / late_count / dup_skipped / rejected / watermark`、`rows[]`、`rejects[]`、逐表明细。
 - **验收复现**：`POL-100000` 的 `u(10:00, 状态=已承保)` 与 `u(10:05, 状态=待核保)` 乱序到达（后者先到），
   合并后终态 `status=待核保`（事件时间 10:05 胜出）。见 `backend/tests/test_watermark_merge.py::test_out_of_order_update_keeps_latest_event_time`。
+
+### 断点续跑（`backend/src/services/merge_run_service.py`）
+
+合并批次是**可中断、可续跑**的执行引擎，解决“跑到一半服务中断 → 页面永远运行中 → 重发又从头重算”的问题：
+
+- **快照边界**：批次首跑冻结 `snapshot_max_event_id`，本批只处理 `cdc_events.id ≤ 边界` 的事件；执行期间持续
+  到达的新事件不进本批（由下一批按同一 `event_time/lsn` 版本规则裁决），**已确认结果不会被新事件冲掉**。
+- **确认单元 = 源表**：一张源表完整折叠成功后，拒绝行与逐表指标才整体落库并写入 `merge_runs.checkpoint`
+  （同事务提交）。中断时当前表未确认 → 续跑整表重算（算法 A 是确定性纯函数，结果逐字一致）；已确认表续跑
+  直接跳过 → **同一批重跑不重复产出**，拒绝行按自然键 `(run_id, table_id, pk, lsn, reason)` 幂等去重，
+  人工复核状态不被覆盖。
+- **分块心跳**：表内事件按 `MERGE_CHUNK_SIZE`（默认 200）分块，每块刷新 `heartbeat_at` 与 `progress` 并提交，
+  页面据此展示处理中 / 剩余数量。`running` 且心跳超过 `RUN_STALE_SECONDS`（默认 60s）未刷新，由 Celery 看门狗
+  任务 `cdcmerge.run_watchdog`（30s 一轮，列表/总览查询也会顺带执行）翻成 `interrupted`，页面不再永远“运行中”。
+- **续跑接口**：`POST /api/runs/{id}/resume`（仅 admin），从最后确认表接上，`attempt_count` 累加，留 `run.resume` 审计。
+- **完成对账**：源事件数 = 应用事件 + 被拒事件；待复核记录按 `pending/replayed/skipped` 闭环，三方对平方置
+  `success`，否则 `partial`。对账明细落在 `metrics.reconciliation`，页面抽屉与批次 CSV 均可见。
+- **故障注入（仅测试/演示）**：`MERGE_FAIL_AFTER_CHUNKS`（第 N 块后中断）、`MERGE_FAIL_AFTER_EVENTS`
+  （确认满 N 条事件且还有未确认表时中断），默认 0 关闭。验收见 `backend/tests/test_resumable_merge.py`。
+- 页面三态：**处理中**（queued/running/interrupted，显示剩余数量）/ **已完成**（success/partial），
+  待复核数量单独以 `review_pending` 呈现；中断批次列表与抽屉内出现「断点续跑」按钮，处理中批次每 2.5s 轮询。
 
 ### 算法 B｜Schema 兼容判定（`backend/src/services/schema_gate.py`）
 
@@ -150,7 +171,7 @@ SEED_SUMMARY brand=cdcmerge users=3 sources=3 runs=2 findings=6 pending=2
 |---|---|---|
 | 角色 `admin/analyst/viewer` | `backend/src/constants/{roles,enums}.py` | `frontend/site/js/config.js`（`ROLE_LABELS`/`PERMISSIONS`） |
 | binlog 操作 `c/u/d` | `backend/src/constants/enums.py::CdcOp` | `config.js::ENUMS.op` |
-| 批次状态 `queued…failed` | `backend/src/constants/enums.py::RunStatus` | `config.js::ENUMS.runStatus` |
+| 批次状态 `queued…failed`（含 `interrupted`） | `backend/src/constants/enums.py::RunStatus` | `config.js::ENUMS.runStatus` |
 | 兼容性 `forward/needs_mapping/breaking` | `backend/src/constants/enums.py::Compat` | `config.js::ENUMS.compat` |
 | 门禁动作 `apply/backfill/block` | `backend/src/constants/enums.py::GateAction` | `config.js::ENUMS.gateAction` |
 | 门禁状态 `pending/approved/blocked` | `backend/src/constants/enums.py::GateStatus` | `config.js::ENUMS.gateStatus` |
@@ -186,8 +207,10 @@ docker-compose.yml  .env  .env.example
 ## 14. 已知取舍
 
 - 事件进入系统只有 seed 与 `POST /api/events` 两条路径，没有真的连 Kafka（离线演示环境）。
-- 合并批次在请求内同步执行（2400 条事件约 100–300ms），未走 Celery 异步队列；worker 只负责心跳与每日定时合并。
+- 合并批次在请求内同步执行，但引擎按分块提交心跳与表级确认点，可被故障注入/真实中断打断并通过
+  `POST /api/runs/{id}/resume` 断点续跑（见「断点续跑」一节）；worker 额外负责心跳、看门狗与每日定时合并。
 - 重放动作只改拒绝行的处置状态并留审计，不会把事件重新投递进合并（真实系统需要 Kafka producer，Demo 中省略）。
+- 续跑沿用批次首跑冻结的事件快照边界；中断期间新到达的事件由**下一批次**按版本规则裁决，保证本批结果确定性。
 
 ## License
 

@@ -46,3 +46,14 @@ def create_run(
     principal: dict = Depends(require_roles(*RUN_CREATE_ROLES)),
 ) -> dict:
     return run_controller.create_run(db, payload.model_dump(), principal, request)
+
+
+@router.post("/{run_id}/resume")
+def resume_run(
+    run_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_roles(*RUN_CREATE_ROLES)),
+) -> dict:
+    """从最后确认表断点续跑：已确认表跳过、未确认表确定性重算，同批不重复产出。"""
+    return run_controller.resume_run(db, run_id, principal, request)

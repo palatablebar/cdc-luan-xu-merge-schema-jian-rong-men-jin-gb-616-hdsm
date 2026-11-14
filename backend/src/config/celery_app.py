@@ -8,6 +8,7 @@ from src.config.settings import settings
 
 TASK_HEARTBEAT = f"{settings.app_name}.heartbeat"
 TASK_DAILY = f"{settings.app_name}.daily_refresh"
+TASK_WATCHDOG = f"{settings.app_name}.run_watchdog"
 
 celery_app = Celery(
     settings.app_name,
@@ -30,5 +31,6 @@ celery_app.conf.update(
 
 celery_app.conf.beat_schedule = {
     f"{settings.app_name}-heartbeat": {"task": TASK_HEARTBEAT, "schedule": 10.0},
+    f"{settings.app_name}-watchdog": {"task": TASK_WATCHDOG, "schedule": 30.0},
     f"{settings.app_name}-daily": {"task": TASK_DAILY, "schedule": crontab(hour=7, minute=40)},
 }

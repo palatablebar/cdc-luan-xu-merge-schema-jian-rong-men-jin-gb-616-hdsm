@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { ENUMS } from '../config.js';
+import { ENUMS, runStatusTone } from '../config.js';
 import { barList, emptyState, errorBox, errorMessage, esc, fmtTime, fmtTimeShort, pct, trendChart, watermarkTrack } from '../ui.js';
 
 function tableCards(tables) {
@@ -42,6 +42,22 @@ export const overviewPage = {
                     events: data.tables.map((table) => `${table.code} · ${table.late} 迟到`),
                   })
                 : emptyState({ title: '还没有合并批次', hint: '去「合并批次」跑一次全库合并。' })
+            }
+            ${
+              latest
+                ? `<div class="run-progress ${latest.status === 'interrupted' ? 'interrupted' : latest.display_status === 'completed' ? 'done' : ''}" style="margin-top:10px">
+                    <span class="rp-track"><span class="rp-fill" style="width:${Math.round(
+                      ((latest.processed_events || 0) / Math.max(1, latest.events_in || 1)) * 100,
+                    )}%"></span></span>
+                    <span class="badge ${runStatusTone(latest.status)}">${esc(latest.status_label)}</span>
+                    <span class="rp-meta pill-count">
+                      ${latest.display_status === 'processing'
+                        ? `处理中 · 剩余 ${esc(latest.remaining_events)} 条`
+                        : `已完成 · 待复核 ${esc(latest.review_pending)} 条`}
+                      ${latest.resumable ? '· 可在「合并批次」断点续跑' : ''}
+                    </span>
+                  </div>`
+                : ''
             }
           </div>
           <div class="ov-hero-side">
@@ -106,8 +122,8 @@ export const overviewPage = {
                       .map(
                         (run) => `<li>
                           <span class="mono">${esc(run.run_no)}</span>
-                          <span class="badge ${run.status === 'success' ? 'ok' : 'warn'}">${esc(run.status_label)}</span>
-                          <span class="mono muted">事件 ${esc(run.events_in)} · 迟到 ${esc(run.late_count)} · 拒绝 ${esc(run.rejected_count)}</span>
+                          <span class="badge ${runStatusTone(run.status)}">${esc(run.status_label)}</span>
+                          <span class="mono muted">事件 ${esc(run.events_in)} · 迟到 ${esc(run.late_count)} · 拒绝 ${esc(run.rejected_count)} · 待复核 ${esc(run.review_pending)}</span>
                           <span class="mono muted">${esc(fmtTime(run.started_at))}</span>
                         </li>`,
                       )

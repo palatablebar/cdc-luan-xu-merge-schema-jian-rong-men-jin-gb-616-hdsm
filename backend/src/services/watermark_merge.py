@@ -128,6 +128,26 @@ def _stale_delete_mark(event: dict, delete_marks: list[tuple]) -> tuple | None:
 
 
 
+def merge_table(
+    events: Iterable[dict],
+    *,
+    allowed_lateness_seconds: int = 30,
+    schema_columns: list[dict] | None = None,
+    watermark: datetime | None = None,
+) -> dict:
+    """单表乱序合并（merge_events 的具名别名）。
+
+    断点续跑以「源表」为确认单元：每个源表独立调用本函数，输入确定则输出逐字一致，
+    因此未确认的表可以安全重算，已确认的表直接跳过，不产生重复结果。
+    """
+    return merge_events(
+        events,
+        allowed_lateness_seconds=allowed_lateness_seconds,
+        schema_columns=schema_columns,
+        watermark=watermark,
+    )
+
+
 def merge_events(
     events: Iterable[dict],
     *,

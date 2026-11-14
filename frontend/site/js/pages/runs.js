@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { can, ENUMS, reasonTone, replayTone } from '../config.js';
+import { can, ENUMS, reasonTone, replayTone, runDisplay, runStatusTone } from '../config.js';
 import {
   bindFilterBar,
   dataTable,
@@ -18,6 +18,40 @@ import {
 } from '../ui.js';
 
 const state = { tableId: '', status: '' };
+
+// 处理中的批次自动轮询刷新（页面切走即停），让“处理中 / 剩余数量”实时前进
+let pollTimer = null;
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function statusBadge(row) {
+  return `<span class="badge ${runStatusTone(row.status)}" data-testid="run-status">${esc(
+    ENUMS.runStatus[row.status] || row.status,
+  )}</span>`;
+}
+
+function progressCell(row) {
+  const progress = row.progress || {};
+  const percent = Math.round((progress.percent || 0) * 100);
+  const total = progress.total_events || row.events_in || 0;
+  const done = progress.processed_events || 0;
+  const remaining = progress.remaining_events ?? Math.max(0, total - done);
+  const mode = row.status === 'interrupted' ? 'interrupted' : row.display_status === 'completed' ? 'done' : '';
+  const meta =
+    row.display_status === 'processing'
+      ? `剩 ${remaining}`
+      : row.review_pending > 0
+        ? `待复核 ${row.review_pending}`
+        : '完成';
+  return `<div class="run-progress ${mode}">
+    <span class="rp-track"><span class="rp-fill" style="width:${percent}%"></span></span>
+    <span class="rp-meta pill-count">${esc(meta)}</span>
+  </div>`;
+}
 
 function rejectTable(rejects, editable) {
   if (!rejects.length) return '<p class="muted">这个批次没有拒绝行。</p>';
@@ -48,7 +82,7 @@ function perTableRows(metrics) {
   const tables = Object.values(metrics.tables || {});
   if (!tables.length) return '<p class="muted">没有按表拆分的指标。</p>';
   return `<div class="table-wrap"><table class="data" style="min-width:0">
-    <thead><tr><th>表</th><th>事件</th><th>upsert</th><th>删除</th><th>迟到</th><th>重复</th><th>拒绝</th></tr></thead>
+    <thead><tr><th>表</th><th>事件</th><th>upsert</th><th>删除</th><th>迟到</th><th>重复</th><th>拒绝</th><th>确认时间</th></tr></thead>
     <tbody>${tables
       .map(
         (table) => `<tr>
@@ -59,6 +93,7 @@ function perTableRows(metrics) {
           <td class="num">${esc(table.late_count)}</td>
           <td class="num">${esc(table.dup_skipped)}</td>
           <td class="num">${esc(table.rejected)}</td>
+          <td class="mono">${esc(fmtTimeShort(table.confirmed_at))}</td>
         </tr>`,
       )
       .join('')}</tbody></table></div>`;
@@ -81,6 +116,45 @@ function sampleRows(samples) {
       .join('')}</tbody></table></div>`;
 }
 
+function reconciliationPanel(recon) {
+  if (!recon) return '';
+  const checks = (recon.checks || []).map(
+    (check) => `<li>
+      <span class="${check.ok ? 'ri-ok' : 'ri-bad'}">${check.ok ? '✓' : '✗'}</span>
+      <span class="mono">${esc(check.detail)}</span>
+    </li>`,
+  );
+  return `<h3 class="drawer-h3">完成对账（源事件 / 应用结果 / 待复核）</h3>
+  <div class="metric-grid">
+    <div class="metric"><span class="k">源事件数</span><b class="pill-count">${esc(recon.source_events)}</b><span class="hint">快照边界内全部事件</span></div>
+    <div class="metric ok"><span class="k">应用结果</span><b class="pill-count">${esc(recon.applied_events)}</b><span class="hint">折叠应用的事件</span></div>
+    <div class="metric alert"><span class="k">待复核记录</span><b class="pill-count">${esc(recon.review_pending)}</b><span class="hint">已重放 ${esc(recon.review_replayed)} · 已跳过 ${esc(recon.review_skipped)}</span></div>
+  </div>
+  <ul class="recon-list">${checks.join('')}</ul>
+  <p class="tiny muted ${recon.balanced ? '' : 'danger-text'}">对账结论：${recon.balanced ? '三方对平，批次成功' : '存在未对平项，批次标记为部分成功（待复核）'}</p>`;
+}
+
+function resumePanel(detail) {
+  const run = detail.run;
+  if (!run.resumable) return '';
+  const progress = run.progress || {};
+  return `<div class="resume-banner" data-testid="resume-banner">
+    <div class="rb-text">
+      批次在 <b>${esc(ENUMS.runStatus[run.status] || run.status)}</b>：已确认 ${esc(progress.confirmed_tables || 0)}/${esc(
+        progress.total_tables || 0,
+      )} 张表，
+      已处理 ${esc(progress.processed_events || 0)}/${esc(progress.total_events || 0)}，剩余 ${esc(
+        progress.remaining_events ?? 0,
+      )} 条。续跑将从最后确认位置接上，已确认结果不重算、拒绝行不重复产出。
+    </div>
+    ${
+      can(detail._role, 'run:create')
+        ? '<button class="btn accent" id="resume-run">断点续跑</button>'
+        : '<span class="tiny muted">仅管理员可续跑</span>'
+    }
+  </div>`;
+}
+
 async function openRun(view, ctx, run) {
   const editable = can(ctx.user.role, 'reject:replay');
   let detail;
@@ -90,14 +164,19 @@ async function openRun(view, ctx, run) {
     toast(errorMessage(err), 'err');
     return;
   }
+  detail._role = ctx.user.role;
   const metrics = detail.run.metrics || {};
+  const display = runDisplay(detail.run);
   const { root, close } = drawer({
     wide: true,
     title: `合并批次 ${detail.run.run_no}`,
     subtitle: `${detail.run.scope} · ${ENUMS.trigger[detail.run.trigger] || detail.run.trigger} · ${detail.run.operator_email}`,
     body: `
+      ${resumePanel(detail)}
       ${metricGrid([
+        { label: '页面状态', value: display.label, hint: ENUMS.runStatus[detail.run.status] || detail.run.status, tone: display.tone },
         { label: '读取事件', value: detail.run.events_in, hint: '批次范围 ' + detail.run.scope },
+        { label: '剩余 / 待复核', value: `${detail.run.progress?.remaining_events ?? 0} / ${detail.run.review_pending}`, hint: '剩余处理量 / 待复核拒绝行' },
         { label: 'upsert 行', value: detail.run.upsert_rows, hint: '按 (pk) 折叠后的终态', tone: 'ok' },
         { label: '删除终态', value: detail.run.deleted_rows, hint: '最后一次操作是 d' },
         { label: '迟到事件', value: detail.run.late_count, hint: `迟到率 ${pct(detail.run.late_ratio)}`, tone: 'warn' },
@@ -106,12 +185,17 @@ async function openRun(view, ctx, run) {
       ])}
       ${kv([
         ['水位线', `<span class="mono">${fmtTimeShort(detail.run.watermark_at)}</span>`],
+        ['快照边界', `<span class="mono">事件 id ≤ ${esc(detail.run.snapshot_max_event_id ?? '—')}</span>`],
         ['允许迟到', `${esc(detail.run.allowed_lateness_seconds)} 秒`],
+        ['执行次数', `${esc(detail.run.attempt_count)} 次（中断续跑 ${Math.max(0, (detail.run.attempt_count || 1) - 1)} 次）`],
+        ['最近心跳', `<span class="mono">${fmtTimeShort(detail.run.heartbeat_at)}</span>`],
         ['开始 / 结束', `${fmtTime(detail.run.started_at)} → ${fmtTime(detail.run.finished_at)}`],
-        ['算法输出摘要', `<span class="mono">${esc(JSON.stringify(metrics.reject_reasons || {}))}</span>`],
       ])}
-      <h3 class="drawer-h3">按表拆分（算法 A 逐表折叠）</h3>
+      <h3 class="drawer-h3">断点进度（确认点）</h3>
+      ${progressCell(detail.run)}
+      <h3 class="drawer-h3">按表拆分（算法 A 逐表折叠，表级确认后续跑跳过）</h3>
       ${perTableRows(metrics)}
+      ${reconciliationPanel(detail.run.reconciliation)}
       <h3 class="drawer-h3">折叠终态样例（按 event_time + lsn 排序后谁赢）</h3>
       ${sampleRows(metrics.samples)}
       <h3 class="drawer-h3">运行日志</h3>
@@ -124,6 +208,23 @@ async function openRun(view, ctx, run) {
           <button class="btn ghost" data-export="rejects">导出拒绝行 CSV</button>
         </div>`
       : '<span class="mono muted">只读角色不能导出</span>',
+  });
+
+  root.querySelector('#resume-run')?.addEventListener('click', async () => {
+    const button = root.querySelector('#resume-run');
+    button.disabled = true;
+    button.textContent = '续跑中…';
+    try {
+      const resumed = await api.post(`/api/runs/${detail.run.id}/resume`, {});
+      toast(`${resumed.run_no} 续跑完成：${resumed.display_status_label}，待复核 ${resumed.review_pending} 条`);
+      close();
+      await openRun(view, ctx, resumed);
+      await runsPage.render(view, ctx);
+    } catch (err) {
+      toast(errorMessage(err), 'err');
+      button.disabled = false;
+      button.textContent = '断点续跑';
+    }
   });
 
   root.querySelectorAll('[data-act]').forEach((button) => {
@@ -162,7 +263,7 @@ async function openRun(view, ctx, run) {
 function openRunForm(view, ctx, tables) {
   const { root, close } = drawer({
     title: '发起合并批次',
-    subtitle: '服务端按水位线重新折叠事件，写入指标与拒绝行',
+    subtitle: '服务端按水位线重新折叠事件，分块确认、可中断续跑',
     body: `<form id="run-form" class="form-grid">
       ${field({
         label: '批次范围',
@@ -189,7 +290,7 @@ function openRunForm(view, ctx, tables) {
           : null,
         trigger: form.trigger.value,
       });
-      toast(`${run.run_no} 完成：upsert ${run.upsert_rows} / 迟到 ${run.late_count} / 拒绝 ${run.rejected_count}`);
+      toast(`${run.run_no} 完成：${run.display_status_label}，upsert ${run.upsert_rows} / 待复核 ${run.review_pending}`);
       close();
       await runsPage.render(view, ctx);
     } catch (err) {
@@ -202,6 +303,7 @@ function openRunForm(view, ctx, tables) {
 
 export const runsPage = {
   async render(view, ctx) {
+    stopPolling();
     let runs;
     let tables;
     try {
@@ -214,6 +316,7 @@ export const runsPage = {
       view.querySelector('#retry-btn')?.addEventListener('click', () => runsPage.render(view, ctx));
       return;
     }
+    const hasProcessing = runs.items.some((row) => row.display_status === 'processing');
     view.innerHTML = `
       <section class="panel">
         <div class="panel-head">
@@ -250,12 +353,24 @@ export const runsPage = {
           columns: [
             { key: 'run_no', label: '批次号', className: 'mono' },
             { key: 'scope', label: '范围' },
-            { key: 'status', label: '状态', render: (row) => `<span class="badge ${row.status === 'success' ? 'ok' : 'warn'}">${esc(ENUMS.runStatus[row.status] || row.status)}</span>` },
+            { key: 'status', label: '状态', render: (row) => statusBadge(row) },
+            {
+              key: 'progress',
+              label: '处理进度 / 剩余',
+              render: (row) => progressCell(row),
+            },
             { key: 'events_in', label: '事件', className: 'num' },
-            { key: 'upsert_rows', label: 'upsert', className: 'num' },
+            { key: 'review_pending', label: '待复核', className: 'num', render: (row) => (row.review_pending ? `<span class="danger-text mono pill-count">${esc(row.review_pending)}</span>` : '0') },
             { key: 'late_count', label: '迟到', className: 'num', render: (row) => (row.late_count ? `<span class="warn-text mono">${row.late_count}</span>` : '0') },
             { key: 'dup_skipped', label: '重复', className: 'num' },
-            { key: 'rejected_count', label: '拒绝', className: 'num', render: (row) => (row.rejected_count ? `<span class="danger-text mono">${row.rejected_count}</span>` : '0') },
+            {
+              key: 'actions',
+              label: '操作',
+              render: (row) =>
+                row.resumable && can(ctx.user.role, 'run:create')
+                  ? '<span class="run-row-actions"><button class="btn sm accent" data-resume="' + row.id + '">续跑</button></span>'
+                  : '<span class="muted tiny">—</span>',
+            },
             { key: 'started_at', label: '开始时间', render: (row) => fmtTime(row.started_at) },
           ],
         })}
@@ -267,12 +382,30 @@ export const runsPage = {
       runsPage.render(view, ctx);
     });
     view.querySelectorAll('table.data tbody tr').forEach((row) => {
-      row.addEventListener('click', () => {
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('[data-resume]')) return; // 续跑按钮不触发抽屉
         const item = runs.items.find((entry) => String(entry.id) === row.dataset.id);
         if (item) openRun(view, ctx, item);
       });
     });
     view.querySelector('#new-run')?.addEventListener('click', () => openRunForm(view, ctx, tables.items));
+    view.querySelectorAll('[data-resume]').forEach((button) => {
+      button.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const id = button.dataset.resume;
+        button.disabled = true;
+        button.textContent = '续跑中…';
+        try {
+          const run = await api.post(`/api/runs/${id}/resume`, {});
+          toast(`${run.run_no} 续跑完成：${run.display_status_label}，待复核 ${run.review_pending} 条`);
+          await runsPage.render(view, ctx);
+        } catch (err) {
+          toast(errorMessage(err), 'err');
+          button.disabled = false;
+          button.textContent = '续跑';
+        }
+      });
+    });
     view.querySelector('#export-runs')?.addEventListener('click', async () => {
       try {
         await api.download('/api/exports/merge-runs.csv', 'merge-runs.csv');
@@ -281,6 +414,22 @@ export const runsPage = {
         toast(errorMessage(err), 'err');
       }
     });
+
+    // 处理中的批次：每 2.5 秒静默轮询，进度与剩余数量自动前进；中断后停止并提示续跑
+    if (hasProcessing) {
+      pollTimer = setInterval(async () => {
+        try {
+          const latest = await api.get('/api/runs', { limit: 30, table_id: state.tableId, status: state.status });
+          const stillProcessing = latest.items.some((row) => row.display_status === 'processing');
+          const anyInterrupted = latest.items.some((row) => row.status === 'interrupted');
+          if (anyInterrupted) toast('检测到批次中断，可从确认点断点续跑', 'err');
+          await runsPage.render(view, ctx);
+          if (!stillProcessing) stopPolling();
+        } catch {
+          stopPolling();
+        }
+      }, 2500);
+    }
   },
 };
 

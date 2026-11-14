@@ -54,6 +54,7 @@ EVENT_STATUS_ORDER: list[str] = [
 class RunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    INTERRUPTED = "interrupted"
     SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"
@@ -62,10 +63,14 @@ class RunStatus(StrEnum):
 RUN_STATUS_LABELS: dict[str, str] = {
     RunStatus.QUEUED.value: "排队中",
     RunStatus.RUNNING.value: "执行中",
+    RunStatus.INTERRUPTED.value: "已中断·待续跑",
     RunStatus.SUCCESS.value: "成功",
     RunStatus.PARTIAL.value: "部分成功",
     RunStatus.FAILED.value: "失败",
 }
+
+# 终态：不再接受续跑；其余状态（queued/running/interrupted/failed）都可以（重新）发起执行。
+RUN_TERMINAL_STATUSES: frozenset[str] = frozenset({RunStatus.SUCCESS.value, RunStatus.PARTIAL.value})
 
 
 class TriggerKind(StrEnum):

@@ -29,14 +29,22 @@ def _stamp(value) -> str:
 def merge_runs_csv(db: Session) -> bytes:
     runs = db.scalars(select(MergeRun).order_by(MergeRun.id)).all()
     tables = {table.id: table for table in db.scalars(select(SourceTable)).all()}
+    pending_rows = db.execute(
+        select(RejectRow.run_id, func.count())
+        .where(RejectRow.replay_status == "pending")
+        .group_by(RejectRow.run_id)
+    ).all()
+    pending_map = {int(run_id): int(count) for run_id, count in pending_rows}
     headers = [
         "运行号", "范围", "触发", "状态", "允许迟到(s)", "事件数", "upsert行",
-        "删除终态", "迟到数", "迟到率", "重复去重", "拒绝行", "水位线", "操作人", "开始时间", "结束时间",
+        "删除终态", "迟到数", "迟到率", "重复去重", "拒绝行", "待复核", "执行次数", "对账对平",
+        "水位线", "操作人", "开始时间", "结束时间",
     ]
     rows = []
     for run in runs:
         table = tables.get(run.table_id)
         metrics = run.metrics or {}
+        recon = metrics.get("reconciliation") or {}
         rows.append(
             [
                 run.run_no,
@@ -51,6 +59,9 @@ def merge_runs_csv(db: Session) -> bytes:
                 f"{metrics.get('late_ratio', 0):.4f}",
                 run.dup_skipped,
                 run.rejected_count,
+                pending_map.get(run.id, 0),
+                run.attempt_count or 1,
+                "是" if recon.get("balanced") else ("否" if recon else ""),
                 _stamp(run.watermark_at),
                 run.operator_email,
                 _stamp(run.started_at),

@@ -52,8 +52,15 @@ export const PERMISSIONS = {
 export const ENUMS = {
   // 共享枚举 1：binlog 行操作
   op: { c: '插入 c', u: '更新 u', d: '删除 d' },
-  // 共享枚举 2：合并批次状态
-  runStatus: { queued: '排队中', running: '执行中', success: '成功', partial: '部分成功', failed: '失败' },
+  // 共享枚举 2：合并批次状态（interrupted=服务中断后保留现场，可断点续跑）
+  runStatus: {
+    queued: '排队中',
+    running: '执行中',
+    interrupted: '已中断·待续跑',
+    success: '成功',
+    partial: '部分成功',
+    failed: '失败',
+  },
   // 共享枚举 3：Schema 兼容性结论
   compat: { forward: '向前兼容', needs_mapping: '需字段映射', breaking: '破坏性变更' },
   // 共享枚举 4：门禁动作
@@ -105,4 +112,29 @@ export function replayTone(status) {
 
 export function severityLabel(severity) {
   return ENUMS.severity[severity] || severity;
+}
+
+/** 批次状态 -> 徽标配色：中断用警示红、执行中用黄、终态成功用绿、部分成功用蓝灰。 */
+export function runStatusTone(status) {
+  return (
+    {
+      running: 'warn',
+      queued: 'info',
+      interrupted: 'danger',
+      success: 'ok',
+      partial: 'info',
+      failed: 'danger',
+    }[status] || 'info'
+  );
+}
+
+/** 页面三态：处理中（含排队/执行中/中断）/ 已完成。待复核数量由 review_pending 单独呈现。 */
+export function runDisplay(row) {
+  const processing = ['queued', 'running', 'interrupted'].includes(row.status);
+  return {
+    key: processing ? 'processing' : 'completed',
+    label: processing ? '处理中' : '已完成',
+    tone: processing ? 'warn' : 'ok',
+    resumable: row.status === 'interrupted' || row.resumable === true,
+  };
 }
